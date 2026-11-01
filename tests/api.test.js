@@ -43,7 +43,7 @@ test("GET health check returns an ok response", async () => {
   await handler({ method: "GET" }, res);
   assert.equal(statusCode, 200);
   assert.equal(payload.ok, true);
-  assert.equal(payload.service, "alice-gemini-serper");
+  assert.equal(payload.service, "alice-polza-serper");
 });
 
 test("launch request returns a valid Alice greeting without external API keys", async () => {
@@ -60,4 +60,38 @@ test("launch request returns a valid Alice greeting without external API keys", 
   assert.equal(payload.version, "1.0");
   assert.match(payload.response.text, /Привет/);
   assert.equal(payload.response.end_session, false);
+});
+
+
+
+test("Polza receives the selected model and conversation, and Alice receives only the answer", async () => {
+  const { default: handler } = await import("../api/index.js");
+  const oldFetch = globalThis.fetch;
+  const oldKey = process.env.POLZA_API_KEY;
+  const oldModel = process.env.POLZA_MODEL;
+  delete process.env.POLZA_MODEL;
+  process.env.POLZA_API_KEY = "test-key";
+  let sent;
+  globalThis.fetch = async (url, options) => {
+    sent = { url, headers: options.headers, body: JSON.parse(options.body) };
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "Ответ" }, finish_reason: "stop" }] }) };
+  };
+  let output;
+  const res = { status() { return this; }, json(value) { output = value; return value; }, setHeader() {} };
+  try {
+    await handler({ method: "POST", body: { request: { command: "Продолжай" }, state: { session: { history: [{ role: "model", text: "Привет" }] } } } }, res);
+    assert.equal(sent.url, "https://polza.ai/api/v1/chat/completions");
+    assert.equal(sent.headers.Authorization, "Bearer test-key");
+    assert.equal(sent.body.model, "openai/gpt-oss-20b");
+    assert.deepEqual(sent.body.messages.slice(1), [{ role: "assistant", content: "Привет" }, { role: "user", content: "Продолжай" }]);
+    assert.equal(output.response.text, "Ответ");
+    assert.equal(output.session_state.history.at(-1).text, "Ответ");
+    process.env.POLZA_MODEL = "vendor/another-model";
+    await handler({ method: "POST", body: { request: { command: "Привет" } } }, res);
+    assert.equal(sent.body.model, "vendor/another-model");
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldKey === undefined) delete process.env.POLZA_API_KEY; else process.env.POLZA_API_KEY = oldKey;
+    if (oldModel === undefined) delete process.env.POLZA_MODEL; else process.env.POLZA_MODEL = oldModel;
+  }
 });
